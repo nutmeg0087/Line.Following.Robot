@@ -1,0 +1,96 @@
+from machine import Pin, PWM, ADC
+import time
+
+# -------------------------
+# MOTORS
+# -------------------------
+m1_in1 = PWM(Pin(10))
+m1_in2 = PWM(Pin(11))
+m2_in1 = PWM(Pin(12))
+m2_in2 = PWM(Pin(13))
+
+for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
+    m.freq(1000)
+
+def set_motors(left_speed, right_speed):
+    # LEFT motor
+    if left_speed >= 0:
+        m1_in1.duty_u16(left_speed)
+        m1_in2.duty_u16(0)
+    else:
+        m1_in1.duty_u16(0)
+        m1_in2.duty_u16(-left_speed)
+
+    # RIGHT motor (inverted wiring)
+    if right_speed >= 0:
+        m2_in1.duty_u16(0)
+        m2_in2.duty_u16(right_speed)
+    else:
+        m2_in1.duty_u16(-right_speed)
+        m2_in2.duty_u16(0)
+
+def stop():
+    set_motors(0, 0)
+
+# -------------------------
+# SENSORS
+# -------------------------
+left_sensor = ADC(26)
+right_sensor = ADC(27)
+
+def read_voltage(adc):
+    return adc.read_u16() / 65535 * 3.3
+
+# -------------------------
+# SETTINGS
+# -------------------------
+THRESHOLD = 1.5
+BASE_SPEED = 50000
+TURN_SPEED = 30000
+
+# -------------------------
+# TIMER START
+# -------------------------
+start_time = time.ticks_ms()
+RUN_TIME = 5000  # 5000 ms = 5 seconds
+
+# -------------------------
+# MAIN LOOP
+# -------------------------
+while True:
+
+    # stop after 5 seconds
+    if time.ticks_diff(time.ticks_ms(), start_time) >= RUN_TIME:
+        stop()
+        break
+
+    left_v = read_voltage(left_sensor)
+    right_v = read_voltage(right_sensor)
+
+    left_black = left_v > THRESHOLD
+    right_black = right_v > THRESHOLD
+
+    print("L:", left_v, "R:", right_v)
+
+    # default forward (both white)
+    left_speed = BASE_SPEED
+    right_speed = BASE_SPEED
+
+    if left_black and not right_black:
+        left_speed = TURN_SPEED
+        right_speed = BASE_SPEED
+
+    elif right_black and not left_black:
+        left_speed = BASE_SPEED
+        right_speed = TURN_SPEED
+
+    elif left_black and right_black:
+        left_speed = BASE_SPEED
+        right_speed = BASE_SPEED
+
+    set_motors(left_speed, right_speed)
+
+    time.sleep(0.05)
+
+# ensure stopped at end
+stop()
