@@ -2,7 +2,7 @@ from machine import Pin, PWM, ADC
 import time
 
 # =====================================================
-# MOTORS
+# MOTORS (UNCHANGED INVERSION LOGIC)
 # =====================================================
 
 m1_in1 = PWM(Pin(10))
@@ -17,10 +17,12 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
 time.sleep(0.3)
 
 def set_motors(left_speed, right_speed):
+
+    # LEFT motor
     m1_in1.duty_u16(int(left_speed))
     m1_in2.duty_u16(0)
 
-    # inverted right motor (unchanged)
+    # RIGHT motor (inverted wiring)
     m2_in1.duty_u16(0)
     m2_in2.duty_u16(int(right_speed))
 
@@ -38,19 +40,32 @@ def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
 
 # =====================================================
-# SETTINGS (more stable tuning)
+# SETTINGS (TUNED FOR SMOOTH CURVES)
 # =====================================================
 
-BASE = 25000
-TURN = 12000   # IMPORTANT: slower = better steering
-THRESHOLD = 1.8  # slightly higher = less noise
+BASE = 24000          # forward speed
+K = 9000              # steering strength (increase = sharper turns)
+
+MIN_SPEED = 12000     # prevents stalling
+MAX_SPEED = 30000
+
+# =====================================================
+# LIMIT FUNCTION
+# =====================================================
+
+def clamp(x):
+    if x < MIN_SPEED:
+        return MIN_SPEED
+    if x > MAX_SPEED:
+        return MAX_SPEED
+    return x
 
 # =====================================================
 # TIMER
 # =====================================================
 
 start_time = time.ticks_ms()
-RUN_TIME = 20000
+RUN_TIME = 40000
 
 # =====================================================
 # LOOP
@@ -62,34 +77,33 @@ while True:
         stop()
         break
 
+    # read sensors
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
     print("L:", left_v, "R:", right_v)
 
-    left_black = left_v > THRESHOLD
-    right_black = right_v > THRESHOLD
-
     # =================================================
-    # FIXED LINE FOLLOW LOGIC
+    # SMOOTH LINE FOLLOWING (KEY CHANGE)
     # =================================================
 
-    if not left_black and not right_black:
-        # centered → go forward
-        set_motors(BASE, BASE)
+    # error tells us how far off center we are
+    error = left_v - right_v
 
-    elif left_black and not right_black:
-        # line is LEFT → turn LEFT (slow left wheel)
-        set_motors(TURN, BASE)
+    # steering correction
+    correction = int(K * error)
 
-    elif right_black and not left_black:
-        # line is RIGHT → turn RIGHT (slow right wheel)
-        set_motors(BASE, TURN)
+    left_speed = BASE - correction
+    right_speed = BASE + correction
 
-    else:
-        # both see line → go forward slowly (intersection or thick line)
-        set_motors(20000, 20000)
+    # clamp speeds so motors stay stable
+    left_speed = clamp(left_speed)
+    right_speed = clamp(right_speed)
+
+    # apply motors
+    set_motors(left_speed, right_speed)
 
     time.sleep(0.02)
 
+# final safety stop
 stop()
