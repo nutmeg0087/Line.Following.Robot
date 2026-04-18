@@ -16,6 +16,7 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
 
 time.sleep(0.3)
 
+
 def set_motors(left_speed, right_speed):
 
     # LEFT motor
@@ -26,8 +27,10 @@ def set_motors(left_speed, right_speed):
     m2_in1.duty_u16(0)
     m2_in2.duty_u16(int(right_speed))
 
+
 def stop():
     set_motors(0, 0)
+
 
 # =====================================================
 # SENSORS
@@ -36,18 +39,29 @@ def stop():
 left_sensor = ADC(26)
 right_sensor = ADC(27)
 
+
 def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
 
+
 # =====================================================
-# SETTINGS (TUNED FOR SMOOTH CURVES)
+# SETTINGS
 # =====================================================
 
-BASE = 24000          # forward speed
-K = 9000              # steering strength (increase = sharper turns)
+BASE = 22000          # slightly slower for better finish-line stopping
+K = 9000              # steering strength
 
-MIN_SPEED = 12000     # prevents stalling
+MIN_SPEED = 12000
 MAX_SPEED = 30000
+
+STOP_LEVEL = 2.0      # strong black detection for finish line
+STOP_CONFIRM = 2      # how many loops before stopping
+
+# memory for angled finish-line detection
+left_seen_time = 0
+right_seen_time = 0
+stop_counter = 0
+
 
 # =====================================================
 # LIMIT FUNCTION
@@ -60,6 +74,7 @@ def clamp(x):
         return MAX_SPEED
     return x
 
+
 # =====================================================
 # TIMER
 # =====================================================
@@ -67,43 +82,86 @@ def clamp(x):
 start_time = time.ticks_ms()
 RUN_TIME = 40000
 
+
 # =====================================================
-# LOOP
+# MAIN LOOP
 # =====================================================
 
 while True:
 
+    # ---------------------------------------------
+    # safety timer stop
+    # ---------------------------------------------
     if time.ticks_diff(time.ticks_ms(), start_time) > RUN_TIME:
         stop()
+        print("Time limit reached")
         break
 
+    # ---------------------------------------------
     # read sensors
+    # ---------------------------------------------
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
     print("L:", left_v, "R:", right_v)
 
-    # =================================================
-    # SMOOTH LINE FOLLOWING (KEY CHANGE)
-    # =================================================
-
-    # error tells us how far off center we are
+    # ---------------------------------------------
+    # SMOOTH LINE FOLLOWING
+    # ---------------------------------------------
     error = left_v - right_v
-
-    # steering correction
     correction = int(K * error)
 
     left_speed = BASE - correction
     right_speed = BASE + correction
 
-    # clamp speeds so motors stay stable
     left_speed = clamp(left_speed)
     right_speed = clamp(right_speed)
 
-    # apply motors
     set_motors(left_speed, right_speed)
+
+    # ---------------------------------------------
+    # IMPROVED FINISH LINE DETECTION
+    # works even if robot approaches at an angle
+    # ---------------------------------------------
+    left_black_strong = left_v > STOP_LEVEL
+    right_black_strong = right_v > STOP_LEVEL
+
+    # remember when each sensor last saw strong black
+    if left_black_strong:
+        left_seen_time = time.ticks_ms()
+
+    if right_black_strong:
+        right_seen_time = time.ticks_ms()
+
+    # if both sensors saw black within this time window
+    recent_window = 300  # milliseconds
+
+    left_recent = (
+        time.ticks_diff(time.ticks_ms(), left_seen_time)
+        < recent_window
+    )
+
+    right_recent = (
+        time.ticks_diff(time.ticks_ms(), right_seen_time)
+        < recent_window
+    )
+
+    if left_recent and right_recent:
+        stop_counter += 1
+    else:
+        stop_counter = 0
+
+    if stop_counter >= STOP_CONFIRM:
+        stop()
+        print("FINISH LINE DETECTED")
+        break
 
     time.sleep(0.02)
 
-# final safety stop
+
+# =====================================================
+# FINAL SAFETY STOP
+# =====================================================
+
 stop()
+print("Robot stopped")
