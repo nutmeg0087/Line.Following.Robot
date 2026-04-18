@@ -1,5 +1,20 @@
-from machine import Pin, PWM, ADC
+from machine import Pin, PWM, ADC, I2C
 import time
+from sh1106 import SH1106_I2C
+
+# =====================================================
+# OLED SETUP
+# =====================================================
+
+i2c = I2C(0, sda=Pin(4), scl=Pin(5), freq=400000)
+devices = i2c.scan()
+print("I2C devices:", [hex(d) for d in devices])
+
+if not devices:
+    raise Exception("No OLED found")
+
+oled = SH1106_I2C(128, 64, i2c, addr=devices[0])
+
 
 # =====================================================
 # MOTORS
@@ -17,12 +32,12 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
 time.sleep(0.3)
 
 
-def set_motors(left_speed, right_speed):
-    m1_in1.duty_u16(int(left_speed))
+def set_motors(left, right):
+    m1_in1.duty_u16(int(left))
     m1_in2.duty_u16(0)
 
     m2_in1.duty_u16(0)
-    m2_in2.duty_u16(int(right_speed))
+    m2_in2.duty_u16(int(right))
 
 
 def stop():
@@ -46,26 +61,19 @@ def read_voltage(adc):
 # =====================================================
 
 BASE = 22000
+K = 8000
 
 MIN_FWD = 12000
 MAX_FWD = 30000
 
-REVERSE_LIMIT = 8000   # how strong reverse is allowed
-K = 10000              # steering strength (slightly higher for responsiveness)
-
 STOP_LEVEL = 2.0
-STOP_CONFIRM = 2
-
-left_seen_time = 0
-right_seen_time = 0
 stop_counter = 0
 
+last_display_time = 0
+DISPLAY_INTERVAL_MS = 200   # 🔥 SAFE OLED UPDATE RATE
 
-# =====================================================
-# LIMIT FUNCTIONS
-# =====================================================
 
-def clamp_forward(x):
+def clamp(x):
     if x < MIN_FWD:
         return MIN_FWD
     if x > MAX_FWD:
@@ -73,101 +81,111 @@ def clamp_forward(x):
     return x
 
 
-def clamp_reverse(x):
-    if x < 0:
-        if x < -REVERSE_LIMIT:
-            return -REVERSE_LIMIT
-    return x
-
-
 # =====================================================
-# TIMER
+# OLED FUNCTION (NON-BLOCKING STYLE)
 # =====================================================
 
-start_time = time.ticks_ms()
-RUN_TIME = 40000
+def update_oled(direction, left_v, right_v):
+    oled.fill(0)
+    oled.text(direction, 0, 0)
+    oled.text("L:%.2f" % left_v, 0, 16)
+    oled.text("R:%.2f" % right_v, 0, 32)
+    oled.show()
 
 
 # =====================================================
 # LOOP
 # =====================================================
 
+start_time = time.ticks_ms()
+RUN_TIME = 40000
+
 while True:
 
+    # stop after time
     if time.ticks_diff(time.ticks_ms(), start_time) > RUN_TIME:
         stop()
+        update_oled("STOP TIME", 0, 0)
         break
+
+    # =================================================
+    # SENSOR READ
+    # =================================================
 
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
-    print("L:", left_v, "R:", right_v)
-
     # =================================================
-    # LINE CENTER ERROR
+    # NORMALIZED ERROR (STABLE STEERING)
     # =================================================
 
-    error = left_v - right_v
+    total = left_v + right_v + 0.0001
+    left_norm = left_v / total
+    right_norm = right_v / total
 
-    # stronger curve response (nonlinear feel)
-    steering = int(K * error)
+    error = left_norm - right_norm
+    abs_error = abs(error)
 
     # =================================================
-    # DIFFERENTIAL MOTOR CONTROL
+    # STEERING LOGIC (BALANCED)
     # =================================================
-    # allow reverse if correction is strong
 
-    left_speed = BASE - steering
-    right_speed = BASE + steering
-
-    # LEFT motor
-    if left_speed >= 0:
-        left_speed = clamp_forward(left_speed)
-        m1_in1.duty_u16(int(left_speed))
-        m1_in2.duty_u16(0)
+    if abs_error < 0.02:
+        steering = 0
+    elif abs_error < 0.10:
+        steering = int(K * error * 1.2)
     else:
-        m1_in1.duty_u16(0)
-        m1_in2.duty_u16(int(abs(left_speed)))
-
-    # RIGHT motor
-    if right_speed >= 0:
-        right_speed = clamp_forward(right_speed)
-        m2_in1.duty_u16(0)
-        m2_in2.duty_u16(int(right_speed))
-    else:
-        m2_in1.duty_u16(int(abs(right_speed)))
-        m2_in2.duty_u16(0)
+        steering = int(K * error * 2.0)
 
     # =================================================
-    # FINISH LINE DETECTION (unchanged but stable)
+    # MOTOR OUTPUT
+    # =================================================
+
+    left_speed = clamp(BASE - steering)
+    right_speed = clamp(BASE + steering)
+
+    set_motors(left_speed, right_speed)
+
+    # =================================================
+    # DIRECTION FOR OLED
+    # =================================================
+
+    if abs_error < 0.02:
+        direction = "STRAIGHT"
+    elif error > 0:
+        direction = "LEFT"
+    else:
+        direction = "RIGHT"
+
+    # =================================================
+    # OLED UPDATE (CRITICAL FIX - NON-BLOCKING)
+    # =================================================
+
+    now = time.ticks_ms()
+
+    if time.ticks_diff(now, last_display_time) > DISPLAY_INTERVAL_MS:
+        update_oled(direction, left_v, right_v)
+        last_display_time = now
+
+    # =================================================
+    # FINISH LINE DETECTION
     # =================================================
 
     left_black = left_v > STOP_LEVEL
     right_black = right_v > STOP_LEVEL
 
-    if left_black:
-        left_seen_time = time.ticks_ms()
-
-    if right_black:
-        right_seen_time = time.ticks_ms()
-
-    window = 300
-
-    if (time.ticks_diff(time.ticks_ms(), left_seen_time) < window and
-        time.ticks_diff(time.ticks_ms(), right_seen_time) < window):
+    if left_black and right_black:
         stop_counter += 1
     else:
         stop_counter = 0
 
-    if stop_counter >= STOP_CONFIRM:
+    if stop_counter >= 2:
         stop()
+        update_oled("FINISH", 0, 0)
         break
 
-    time.sleep(0.02)
+    time.sleep(0.015)
 
-
-# =====================================================
-# STOP
-# =====================================================
 
 stop()
+update_oled("STOPPED", 0, 0)
