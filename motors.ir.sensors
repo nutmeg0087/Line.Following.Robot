@@ -2,7 +2,7 @@ from machine import Pin, PWM, ADC
 import time
 
 # =====================================================
-# MOTORS (UNCHANGED FROM YOUR WORKING VERSION)
+# MOTORS
 # =====================================================
 
 m1_in1 = PWM(Pin(10))
@@ -16,11 +16,16 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
 
 time.sleep(0.3)
 
-def stop():
-    m1_in1.duty_u16(0)
+def set_motors(left_speed, right_speed):
+    m1_in1.duty_u16(int(left_speed))
     m1_in2.duty_u16(0)
+
+    # inverted right motor (unchanged)
     m2_in1.duty_u16(0)
-    m2_in2.duty_u16(0)
+    m2_in2.duty_u16(int(right_speed))
+
+def stop():
+    set_motors(0, 0)
 
 # =====================================================
 # SENSORS
@@ -33,19 +38,19 @@ def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
 
 # =====================================================
-# SETTINGS
+# SETTINGS (more stable tuning)
 # =====================================================
 
-BASE = 20000
-TURN = 12000
-THRESHOLD = 1.5
+BASE = 25000
+TURN = 12000   # IMPORTANT: slower = better steering
+THRESHOLD = 1.8  # slightly higher = less noise
 
 # =====================================================
 # TIMER
 # =====================================================
 
 start_time = time.ticks_ms()
-RUN_TIME = 5000
+RUN_TIME = 20000
 
 # =====================================================
 # LOOP
@@ -53,7 +58,6 @@ RUN_TIME = 5000
 
 while True:
 
-    # stop after 5 seconds
     if time.ticks_diff(time.ticks_ms(), start_time) > RUN_TIME:
         stop()
         break
@@ -67,40 +71,24 @@ while True:
     right_black = right_v > THRESHOLD
 
     # =================================================
-    # MOTOR CONTROL (EXACT YOUR WORKING STRUCTURE)
+    # FIXED LINE FOLLOW LOGIC
     # =================================================
 
     if not left_black and not right_black:
-        # BOTH WHITE → forward
-        m1_in1.duty_u16(BASE)
-        m1_in2.duty_u16(0)
-
-        m2_in1.duty_u16(0)
-        m2_in2.duty_u16(BASE)
+        # centered → go forward
+        set_motors(BASE, BASE)
 
     elif left_black and not right_black:
-        # line left → slow left side
-        m1_in1.duty_u16(TURN)
-        m1_in2.duty_u16(0)
-
-        m2_in1.duty_u16(0)
-        m2_in2.duty_u16(BASE)
+        # line is LEFT → turn LEFT (slow left wheel)
+        set_motors(TURN, BASE)
 
     elif right_black and not left_black:
-        # line right → slow right side
-        m1_in1.duty_u16(BASE)
-        m1_in2.duty_u16(0)
-
-        m2_in1.duty_u16(0)
-        m2_in2.duty_u16(TURN)
+        # line is RIGHT → turn RIGHT (slow right wheel)
+        set_motors(BASE, TURN)
 
     else:
-        # both black → forward
-        m1_in1.duty_u16(BASE)
-        m1_in2.duty_u16(0)
-
-        m2_in1.duty_u16(0)
-        m2_in2.duty_u16(BASE)
+        # both see line → go forward slowly (intersection or thick line)
+        set_motors(20000, 20000)
 
     time.sleep(0.02)
 
