@@ -3,26 +3,24 @@ import time
 from sh1106 import SH1106_I2C
 
 # =====================================================
-# OLED SETUP
+# OLED
 # =====================================================
 
 i2c = I2C(0, sda=Pin(4), scl=Pin(5), freq=400000)
 devices = i2c.scan()
 
-if not devices:
-    raise Exception("No OLED found")
-
-oled = SH1106_I2C(128, 64, i2c, addr=devices[0])
-
+oled = None
+if devices:
+    oled = SH1106_I2C(128, 64, i2c, addr=devices[0])
 
 def show(msg):
-    oled.fill(0)
-    oled.text(msg, 0, 0)
-    oled.show()
-
+    if oled:
+        oled.fill(0)
+        oled.text(msg, 0, 0)
+        oled.show()
 
 # =====================================================
-# MOTORS
+# MOTORS (SAFE VERSION)
 # =====================================================
 
 m1_in1 = PWM(Pin(10))
@@ -34,170 +32,162 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.freq(1000)
     m.duty_u16(0)
 
-
-def set_motors(l, r):
-    m1_in1.duty_u16(int(l))
+def set_motors(left, right):
+    # LEFT motor forward only
+    m1_in1.duty_u16(int(left))
     m1_in2.duty_u16(0)
 
+    # RIGHT motor forward only (inverted wiring handled)
     m2_in1.duty_u16(0)
-    m2_in2.duty_u16(int(r))
-
+    m2_in2.duty_u16(int(right))
 
 def stop():
     set_motors(0, 0)
 
-
 # =====================================================
-# LINE SENSORS
+# SENSORS
 # =====================================================
 
 left_sensor = ADC(26)
 right_sensor = ADC(27)
 
-
 def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
 
-
 # =====================================================
-# YOUR ORIGINAL SONAR (UNCHANGED LOGIC)
+# SONAR
 # =====================================================
 
 TRIG = Pin(14, Pin.OUT)
 ECHO = Pin(15, Pin.IN)
 
-TRIG_PULSE_US = 10
-TIMEOUT_US = 30000
-SPEED_CM_PER_US = 0.0343
-
-
-def send_trigger_pulse():
+def distance_cm():
     TRIG.value(0)
     time.sleep_us(2)
     TRIG.value(1)
-    time.sleep_us(TRIG_PULSE_US)
+    time.sleep_us(10)
     TRIG.value(0)
 
-
-def measure_echo_pulse_us(timeout_us=TIMEOUT_US):
-
-    start_wait = time.ticks_us()
+    start = time.ticks_us()
 
     while ECHO.value() == 0:
-        if time.ticks_diff(time.ticks_us(), start_wait) > timeout_us:
+        if time.ticks_diff(time.ticks_us(), start) > 30000:
             return None
 
     pulse_start = time.ticks_us()
 
     while ECHO.value() == 1:
-        if time.ticks_diff(time.ticks_us(), pulse_start) > timeout_us:
+        if time.ticks_diff(time.ticks_us(), pulse_start) > 30000:
             return None
 
     pulse_end = time.ticks_us()
 
-    return time.ticks_diff(pulse_end, pulse_start)
-
-
-def distance_cm():
-    send_trigger_pulse()
-    echo_us = measure_echo_pulse_us()
-
-    if echo_us is None:
-        return None
-
-    return (echo_us * SPEED_CM_PER_US) / 2
-
+    return time.ticks_diff(pulse_end, pulse_start) * 0.0343 / 2
 
 # =====================================================
 # SETTINGS
 # =====================================================
 
-BASE = 22000
-K = 8000
+BASE = 20000
+K = 14000   # 🔥 stronger turning restored safely
 
-MIN_FWD = 12000
-MAX_FWD = 30000
-
-SONAR_STOP = 10  # cm
+SONAR_STOP = 10
+FINISH_THRESHOLD = 2.0
 
 stop_counter = 0
 
 last_sonar = 0
+last_oled = 0
 distance = None
-
-
-def clamp(x):
-    if x < MIN_FWD:
-        return MIN_FWD
-    if x > MAX_FWD:
-        return MAX_FWD
-    return x
-
 
 # =====================================================
 # LOOP
 # =====================================================
 
-start_time = time.ticks_ms()
-RUN_TIME = 40000
-
 while True:
-
-    # =================================================
-    # LINE FOLLOWING
-    # =================================================
 
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
-    total = left_v + right_v + 0.0001
-    error = (left_v / total) - (right_v / total)
+    error = left_v - right_v
+
+    # amplify weak turns
+    if abs(error) < 0.05:
+        error = 0
+    elif abs(error) < 0.5:
+        error *= 2.5
+    else:
+        error *= 1.8
 
     steering = int(K * error)
 
-    left_speed = clamp(BASE - steering)
-    right_speed = clamp(BASE + steering)
+    left_speed = BASE - steering
+    right_speed = BASE + steering
+
+    # clamp safe forward range ONLY
+    if left_speed < 0:
+        left_speed = 0
+    if right_speed < 0:
+        right_speed = 0
+
+    if left_speed > 30000:
+        left_speed = 30000
+    if right_speed > 30000:
+        right_speed = 30000
 
     set_motors(left_speed, right_speed)
 
     # =================================================
-    # SONAR (SLOW SAFE UPDATE)
+    # SONAR
     # =================================================
 
     now = time.ticks_ms()
 
-    if time.ticks_diff(now, last_sonar) > 120:   # IMPORTANT
+    if time.ticks_diff(now, last_sonar) > 120:
         d = distance_cm()
         if d is not None:
             distance = d
         last_sonar = now
 
-    # =================================================
-    # OBSTACLE STOP
-    # =================================================
-
-    if distance is not None:
-        print("SONAR:", distance)
-
-        if distance < SONAR_STOP:
-            stop()
-            show("STOP OBJ")
-            time.sleep(0.5)
-            continue
+    if distance is not None and distance < SONAR_STOP:
+        stop()
+        show("OBSTACLE")
+        time.sleep(0.5)
+        continue
 
     # =================================================
-    # OLED (SAFE UPDATE)
+    # OLED
     # =================================================
 
-    if abs(error) < 0.02:
-        msg = "STRAIGHT"
-    elif error > 0:
-        msg = "LEFT"
+    if time.ticks_diff(now, last_oled) > 200:
+
+        if abs(error) < 0.1:
+            show("STRAIGHT")
+        elif error > 0:
+            show("LEFT")
+        else:
+            show("RIGHT")
+
+        last_oled = now
+
+    # =================================================
+    # FINISH LINE
+    # =================================================
+
+    left_black = left_v > FINISH_THRESHOLD
+    right_black = right_v > FINISH_THRESHOLD
+
+    if left_black and right_black:
+        stop_counter += 1
     else:
-        msg = "RIGHT"
+        stop_counter = 0
 
-    show(msg)
+    if stop_counter >= 5:
+        stop()
+        show("FINISH")
+        break
 
-    time.sleep(0.015)
+    time.sleep(0.012)
 
 stop()
+show("STOP")
