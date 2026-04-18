@@ -8,12 +8,17 @@ from sh1106 import SH1106_I2C
 
 i2c = I2C(0, sda=Pin(4), scl=Pin(5), freq=400000)
 devices = i2c.scan()
-print("I2C devices:", [hex(d) for d in devices])
 
 if not devices:
     raise Exception("No OLED found")
 
 oled = SH1106_I2C(128, 64, i2c, addr=devices[0])
+
+
+def show(msg):
+    oled.fill(0)
+    oled.text(msg, 0, 0)
+    oled.show()
 
 
 # =====================================================
@@ -29,15 +34,13 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.freq(1000)
     m.duty_u16(0)
 
-time.sleep(0.3)
 
-
-def set_motors(left, right):
-    m1_in1.duty_u16(int(left))
+def set_motors(l, r):
+    m1_in1.duty_u16(int(l))
     m1_in2.duty_u16(0)
 
     m2_in1.duty_u16(0)
-    m2_in2.duty_u16(int(right))
+    m2_in2.duty_u16(int(r))
 
 
 def stop():
@@ -45,7 +48,7 @@ def stop():
 
 
 # =====================================================
-# SENSORS
+# LINE SENSORS
 # =====================================================
 
 left_sensor = ADC(26)
@@ -54,6 +57,55 @@ right_sensor = ADC(27)
 
 def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
+
+
+# =====================================================
+# YOUR ORIGINAL SONAR (UNCHANGED LOGIC)
+# =====================================================
+
+TRIG = Pin(14, Pin.OUT)
+ECHO = Pin(15, Pin.IN)
+
+TRIG_PULSE_US = 10
+TIMEOUT_US = 30000
+SPEED_CM_PER_US = 0.0343
+
+
+def send_trigger_pulse():
+    TRIG.value(0)
+    time.sleep_us(2)
+    TRIG.value(1)
+    time.sleep_us(TRIG_PULSE_US)
+    TRIG.value(0)
+
+
+def measure_echo_pulse_us(timeout_us=TIMEOUT_US):
+
+    start_wait = time.ticks_us()
+
+    while ECHO.value() == 0:
+        if time.ticks_diff(time.ticks_us(), start_wait) > timeout_us:
+            return None
+
+    pulse_start = time.ticks_us()
+
+    while ECHO.value() == 1:
+        if time.ticks_diff(time.ticks_us(), pulse_start) > timeout_us:
+            return None
+
+    pulse_end = time.ticks_us()
+
+    return time.ticks_diff(pulse_end, pulse_start)
+
+
+def distance_cm():
+    send_trigger_pulse()
+    echo_us = measure_echo_pulse_us()
+
+    if echo_us is None:
+        return None
+
+    return (echo_us * SPEED_CM_PER_US) / 2
 
 
 # =====================================================
@@ -66,11 +118,12 @@ K = 8000
 MIN_FWD = 12000
 MAX_FWD = 30000
 
-STOP_LEVEL = 2.0
+SONAR_STOP = 10  # cm
+
 stop_counter = 0
 
-last_display_time = 0
-DISPLAY_INTERVAL_MS = 200   # 🔥 SAFE OLED UPDATE RATE
+last_sonar = 0
+distance = None
 
 
 def clamp(x):
@@ -82,18 +135,6 @@ def clamp(x):
 
 
 # =====================================================
-# OLED FUNCTION (NON-BLOCKING STYLE)
-# =====================================================
-
-def update_oled(direction, left_v, right_v):
-    oled.fill(0)
-    oled.text(direction, 0, 0)
-    oled.text("L:%.2f" % left_v, 0, 16)
-    oled.text("R:%.2f" % right_v, 0, 32)
-    oled.show()
-
-
-# =====================================================
 # LOOP
 # =====================================================
 
@@ -102,44 +143,17 @@ RUN_TIME = 40000
 
 while True:
 
-    # stop after time
-    if time.ticks_diff(time.ticks_ms(), start_time) > RUN_TIME:
-        stop()
-        update_oled("STOP TIME", 0, 0)
-        break
-
     # =================================================
-    # SENSOR READ
+    # LINE FOLLOWING
     # =================================================
 
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
-    # =================================================
-    # NORMALIZED ERROR (STABLE STEERING)
-    # =================================================
-
     total = left_v + right_v + 0.0001
-    left_norm = left_v / total
-    right_norm = right_v / total
+    error = (left_v / total) - (right_v / total)
 
-    error = left_norm - right_norm
-    abs_error = abs(error)
-
-    # =================================================
-    # STEERING LOGIC (BALANCED)
-    # =================================================
-
-    if abs_error < 0.02:
-        steering = 0
-    elif abs_error < 0.10:
-        steering = int(K * error * 1.2)
-    else:
-        steering = int(K * error * 2.0)
-
-    # =================================================
-    # MOTOR OUTPUT
-    # =================================================
+    steering = int(K * error)
 
     left_speed = clamp(BASE - steering)
     right_speed = clamp(BASE + steering)
@@ -147,45 +161,43 @@ while True:
     set_motors(left_speed, right_speed)
 
     # =================================================
-    # DIRECTION FOR OLED
-    # =================================================
-
-    if abs_error < 0.02:
-        direction = "STRAIGHT"
-    elif error > 0:
-        direction = "LEFT"
-    else:
-        direction = "RIGHT"
-
-    # =================================================
-    # OLED UPDATE (CRITICAL FIX - NON-BLOCKING)
+    # SONAR (SLOW SAFE UPDATE)
     # =================================================
 
     now = time.ticks_ms()
 
-    if time.ticks_diff(now, last_display_time) > DISPLAY_INTERVAL_MS:
-        update_oled(direction, left_v, right_v)
-        last_display_time = now
+    if time.ticks_diff(now, last_sonar) > 120:   # IMPORTANT
+        d = distance_cm()
+        if d is not None:
+            distance = d
+        last_sonar = now
 
     # =================================================
-    # FINISH LINE DETECTION
+    # OBSTACLE STOP
     # =================================================
 
-    left_black = left_v > STOP_LEVEL
-    right_black = right_v > STOP_LEVEL
+    if distance is not None:
+        print("SONAR:", distance)
 
-    if left_black and right_black:
-        stop_counter += 1
+        if distance < SONAR_STOP:
+            stop()
+            show("STOP OBJ")
+            time.sleep(0.5)
+            continue
+
+    # =================================================
+    # OLED (SAFE UPDATE)
+    # =================================================
+
+    if abs(error) < 0.02:
+        msg = "STRAIGHT"
+    elif error > 0:
+        msg = "LEFT"
     else:
-        stop_counter = 0
+        msg = "RIGHT"
 
-    if stop_counter >= 2:
-        stop()
-        update_oled("FINISH", 0, 0)
-        break
+    show(msg)
 
     time.sleep(0.015)
 
-
 stop()
-update_oled("STOPPED", 0, 0)
