@@ -20,6 +20,26 @@ def show(msg):
         oled.show()
 
 # =====================================================
+# LEDS (YOUR PINS 6–9 + ONBOARD)
+# =====================================================
+
+led1 = Pin(6, Pin.OUT)
+led2 = Pin(7, Pin.OUT)
+led3 = Pin(8, Pin.OUT)
+led4 = Pin(9, Pin.OUT)
+onboard = Pin("LED", Pin.OUT)
+
+def leds(a=0, b=0, c=0, d=0, main=0):
+    led1.value(a)
+    led2.value(b)
+    led3.value(c)
+    led4.value(d)
+    onboard.value(main)
+
+def leds_off():
+    leds(0, 0, 0, 0, 0)
+
+# =====================================================
 # MOTORS (SAFE VERSION)
 # =====================================================
 
@@ -33,11 +53,9 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.duty_u16(0)
 
 def set_motors(left, right):
-    # LEFT motor forward only
     m1_in1.duty_u16(int(left))
     m1_in2.duty_u16(0)
 
-    # RIGHT motor forward only (inverted wiring handled)
     m2_in1.duty_u16(0)
     m2_in2.duty_u16(int(right))
 
@@ -89,13 +107,12 @@ def distance_cm():
 # =====================================================
 
 BASE = 20000
-K = 14000   # 🔥 stronger turning restored safely
+K = 14000
 
 SONAR_STOP = 10
 FINISH_THRESHOLD = 2.0
 
 stop_counter = 0
-
 last_sonar = 0
 last_oled = 0
 distance = None
@@ -111,7 +128,6 @@ while True:
 
     error = left_v - right_v
 
-    # amplify weak turns
     if abs(error) < 0.05:
         error = 0
     elif abs(error) < 0.5:
@@ -124,7 +140,6 @@ while True:
     left_speed = BASE - steering
     right_speed = BASE + steering
 
-    # clamp safe forward range ONLY
     if left_speed < 0:
         left_speed = 0
     if right_speed < 0:
@@ -136,6 +151,20 @@ while True:
         right_speed = 30000
 
     set_motors(left_speed, right_speed)
+
+    # =================================================
+    # LED + OLED DIRECTION DISPLAY
+    # =================================================
+
+    if abs(error) < 0.1:
+        show("STRAIGHT")
+        leds(0, 0, 1, 0, 1)   # center + onboard
+    elif error > 0:
+        show("LEFT")
+        leds(1, 1, 0, 0, 1)   # left side
+    else:
+        show("RIGHT")
+        leds(0, 0, 1, 1, 1)   # right side
 
     # =================================================
     # SONAR
@@ -152,23 +181,9 @@ while True:
     if distance is not None and distance < SONAR_STOP:
         stop()
         show("OBSTACLE")
+        leds(1, 1, 1, 1, 1)   # FULL ALERT
         time.sleep(0.5)
         continue
-
-    # =================================================
-    # OLED
-    # =================================================
-
-    if time.ticks_diff(now, last_oled) > 200:
-
-        if abs(error) < 0.1:
-            show("STRAIGHT")
-        elif error > 0:
-            show("LEFT")
-        else:
-            show("RIGHT")
-
-        last_oled = now
 
     # =================================================
     # FINISH LINE
@@ -185,9 +200,16 @@ while True:
     if stop_counter >= 5:
         stop()
         show("FINISH")
+
+        for _ in range(6):
+            leds(1, 1, 1, 1, 1)
+            time.sleep(0.15)
+            leds_off()
+            time.sleep(0.15)
         break
 
     time.sleep(0.012)
 
 stop()
 show("STOP")
+leds_off()
