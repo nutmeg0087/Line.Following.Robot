@@ -1,5 +1,6 @@
 from machine import Pin, PWM, ADC, I2C
 import time
+import math
 from sh1106 import SH1106_I2C
 
 # =====================================================
@@ -20,7 +21,7 @@ def show(msg):
         oled.show()
 
 # =====================================================
-# LEDS (YOUR PINS 6–9 + ONBOARD)
+# LEDS (RESTORED)
 # =====================================================
 
 led1 = Pin(6, Pin.OUT)
@@ -36,11 +37,8 @@ def leds(a=0, b=0, c=0, d=0, main=0):
     led4.value(d)
     onboard.value(main)
 
-def leds_off():
-    leds(0, 0, 0, 0, 0)
-
 # =====================================================
-# MOTORS (SAFE VERSION)
+# MOTORS (UNCHANGED)
 # =====================================================
 
 m1_in1 = PWM(Pin(10))
@@ -52,15 +50,22 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.freq(1000)
     m.duty_u16(0)
 
-def set_motors(left, right):
-    m1_in1.duty_u16(int(left))
-    m1_in2.duty_u16(0)
+MAX_PWM = 30000
 
-    m2_in1.duty_u16(0)
-    m2_in2.duty_u16(int(right))
+def set_motor(left, right):
+    if left >= 0:
+        m1_in1.duty_u16(int(left))
+        m1_in2.duty_u16(0)
+    else:
+        m1_in1.duty_u16(0)
+        m1_in2.duty_u16(int(-left))
 
-def stop():
-    set_motors(0, 0)
+    if right >= 0:
+        m2_in2.duty_u16(int(right))
+        m2_in1.duty_u16(0)
+    else:
+        m2_in2.duty_u16(0)
+        m2_in1.duty_u16(int(-right))
 
 # =====================================================
 # SENSORS
@@ -73,52 +78,20 @@ def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
 
 # =====================================================
-# SONAR
-# =====================================================
-
-TRIG = Pin(14, Pin.OUT)
-ECHO = Pin(15, Pin.IN)
-
-def distance_cm():
-    TRIG.value(0)
-    time.sleep_us(2)
-    TRIG.value(1)
-    time.sleep_us(10)
-    TRIG.value(0)
-
-    start = time.ticks_us()
-
-    while ECHO.value() == 0:
-        if time.ticks_diff(time.ticks_us(), start) > 30000:
-            return None
-
-    pulse_start = time.ticks_us()
-
-    while ECHO.value() == 1:
-        if time.ticks_diff(time.ticks_us(), pulse_start) > 30000:
-            return None
-
-    pulse_end = time.ticks_us()
-
-    return time.ticks_diff(pulse_end, pulse_start) * 0.0343 / 2
-
-# =====================================================
 # SETTINGS
 # =====================================================
 
-BASE = 20000
-K = 14000
+BASE = 22000
+K = 6000
 
-SONAR_STOP = 10
-FINISH_THRESHOLD = 2.0
+MAX_STEERING = 24000
 
-stop_counter = 0
-last_sonar = 0
-last_oled = 0
-distance = None
+REVERSE_STRENGTH = 0.35
+
+last_error = 0
 
 # =====================================================
-# LOOP
+# MAIN LOOP
 # =====================================================
 
 while True:
@@ -128,88 +101,65 @@ while True:
 
     error = left_v - right_v
 
-    if abs(error) < 0.05:
-        error = 0
-    elif abs(error) < 0.5:
-        error *= 2.5
-    else:
-        error *= 1.8
+    # smoothing
+    error = (error * 0.7) + (last_error * 0.3)
+    last_error = error
 
-    steering = int(K * error)
+    # -------------------------------------------------
+    # STEERING FORCE
+    # -------------------------------------------------
 
-    left_speed = BASE - steering
-    right_speed = BASE + steering
+    steering = K * error
+    steering = max(-MAX_STEERING, min(MAX_STEERING, steering))
 
-    if left_speed < 0:
-        left_speed = 0
-    if right_speed < 0:
-        right_speed = 0
+    base = BASE - (abs(steering) // 3)
+    if base < 12000:
+        base = 12000
 
-    if left_speed > 30000:
-        left_speed = 30000
-    if right_speed > 30000:
-        right_speed = 30000
+    # -------------------------------------------------
+    # NORMAL MIX
+    # -------------------------------------------------
 
-    set_motors(left_speed, right_speed)
+    left_speed = base - steering
+    right_speed = base + steering
 
-    # =================================================
-    # LED + OLED DIRECTION DISPLAY
-    # =================================================
+    # -------------------------------------------------
+    # REVERSE WHEEL ASSIST
+    # -------------------------------------------------
 
-    if abs(error) < 0.1:
-        show("STRAIGHT")
-        leds(0, 0, 1, 0, 1)   # center + onboard
+    turn_intensity = abs(steering) / MAX_STEERING
+
+    if turn_intensity > 0.2:
+        reverse_amount = int(8000 * turn_intensity * REVERSE_STRENGTH)
+
+        if steering > 0:
+            left_speed -= reverse_amount
+        else:
+            right_speed -= reverse_amount
+
+    # -------------------------------------------------
+    # SAFETY LIMITS
+    # -------------------------------------------------
+
+    left_speed = max(-12000, min(MAX_PWM, left_speed))
+    right_speed = max(-12000, min(MAX_PWM, right_speed))
+
+    set_motor(left_speed, right_speed)
+
+    # -------------------------------------------------
+    # DISPLAY + LEDS (FIXED)
+    # -------------------------------------------------
+
+    if abs(error) < 0.08:
+        show("CENTER")
+        leds(0, 0, 1, 0, 1)
+
     elif error > 0:
-        show("LEFT")
-        leds(1, 1, 0, 0, 1)   # left side
-    else:
         show("RIGHT")
-        leds(0, 0, 1, 1, 1)   # right side
+        leds(0, 0, 1, 1, 1)
 
-    # =================================================
-    # SONAR
-    # =================================================
-
-    now = time.ticks_ms()
-
-    if time.ticks_diff(now, last_sonar) > 120:
-        d = distance_cm()
-        if d is not None:
-            distance = d
-        last_sonar = now
-
-    if distance is not None and distance < SONAR_STOP:
-        stop()
-        show("OBSTACLE")
-        leds(1, 1, 1, 1, 1)   # FULL ALERT
-        time.sleep(0.5)
-        continue
-
-    # =================================================
-    # FINISH LINE
-    # =================================================
-
-    left_black = left_v > FINISH_THRESHOLD
-    right_black = right_v > FINISH_THRESHOLD
-
-    if left_black and right_black:
-        stop_counter += 1
     else:
-        stop_counter = 0
+        show("LEFT")
+        leds(1, 1, 0, 0, 1)
 
-    if stop_counter >= 5:
-        stop()
-        show("FINISH")
-
-        for _ in range(6):
-            leds(1, 1, 1, 1, 1)
-            time.sleep(0.15)
-            leds_off()
-            time.sleep(0.15)
-        break
-
-    time.sleep(0.012)
-
-stop()
-show("STOP")
-leds_off()
+    time.sleep(0.01)
