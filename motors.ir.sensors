@@ -152,14 +152,14 @@ MAX_FWD = 30000
 
 SONAR_STOP = 10
 
-# FINISH LINE
+# FINISH LINE CONTROL (FIXED)
 STOP_LEVEL = 2.0
-STOP_CONFIRM = 2
-RECENT_WINDOW = 300
 
-left_seen_time = 0
-right_seen_time = 0
-stop_counter = 0
+INTERSECTION_TIME = 120   # thin line (ignore)
+FINISH_TIME = 180         # thick line (stop)
+GRACE_TIME = 80           # prevents reset from flicker
+
+both_black_start = None
 
 # SHARP TURN
 SHARP_TURN = 0.18
@@ -183,10 +183,8 @@ def clamp(x):
 
 while True:
 
-    # ---------------- BUZZER ----------------
     update_buzzer()
 
-    # ---------------- LINE SENSORS ----------------
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
@@ -194,7 +192,7 @@ while True:
     error = (left_v / total) - (right_v / total)
 
     # =================================================
-    # SHARP TURN (REVERSE ONE WHEEL)
+    # SHARP TURN (ONE WHEEL REVERSE)
     # =================================================
 
     if error > SHARP_TURN:
@@ -214,12 +212,15 @@ while True:
     else:
         steering = int(K * error)
 
-        left_speed = clamp(BASE - steering)
-        right_speed = clamp(BASE + steering)
+        set_motors(
+            clamp(BASE - steering),
+            clamp(BASE + steering)
+        )
 
-        set_motors(left_speed, right_speed)
+    # =================================================
+    # SONAR
+    # =================================================
 
-    # ---------------- SONAR ----------------
     now = time.ticks_ms()
 
     if time.ticks_diff(now, last_sonar) > 120:
@@ -235,31 +236,40 @@ while True:
             time.sleep(0.5)
             continue
 
-    # ---------------- FINISH LINE ----------------
+    # =================================================
+    # FINISH LINE vs INTERSECTION (FIXED)
+    # =================================================
 
     left_black = left_v > STOP_LEVEL
     right_black = right_v > STOP_LEVEL
+    both_black = left_black and right_black
 
-    if left_black:
-        left_seen_time = time.ticks_ms()
+    if both_black:
 
-    if right_black:
-        right_seen_time = time.ticks_ms()
+        if both_black_start is None:
+            both_black_start = time.ticks_ms()
 
-    left_recent = time.ticks_diff(time.ticks_ms(), left_seen_time) < RECENT_WINDOW
-    right_recent = time.ticks_diff(time.ticks_ms(), right_seen_time) < RECENT_WINDOW
+        duration = time.ticks_diff(time.ticks_ms(), both_black_start)
 
-    if left_recent and right_recent:
-        stop_counter += 1
+        # INTERSECTION → ignore
+        if duration < INTERSECTION_TIME:
+            pass
+
+        # FINISH LINE → stop
+        elif duration > FINISH_TIME:
+            stop()
+            show("FINISH")
+            break
+
     else:
-        stop_counter = 0
+        # prevent false reset from brief sensor flicker
+        if both_black_start is not None:
+            if time.ticks_diff(now, both_black_start) > GRACE_TIME:
+                both_black_start = None
 
-    if stop_counter >= STOP_CONFIRM:
-        stop()
-        show("FINISH")
-        break
-
-    # ---------------- OLED ----------------
+    # =================================================
+    # OLED
+    # =================================================
 
     if abs(error) < 0.02:
         show("STRAIGHT")
