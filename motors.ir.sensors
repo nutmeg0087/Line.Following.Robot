@@ -25,37 +25,17 @@ def show(msg):
 # BUZZER (D CLASSICAL MELODIC MINOR SCALE)
 # =====================================================
 
-# Buzzer on Pin 22
 buzzer = PWM(Pin(22))
 buzzer.duty_u16(0)
-buzzer.freq(440)
 
-# Ascending: D E F G A B C# D
-# Descending: D C Bb A G F E D
 scale_notes = [
-    # Ascending
-    294,  # D4
-    330,  # E4
-    349,  # F4
-    392,  # G4
-    440,  # A4
-    494,  # B4
-    554,  # C#5
-    587,  # D5
-
-    # Descending
-    523,  # C5
-    466,  # Bb4
-    440,  # A4
-    392,  # G4
-    349,  # F4
-    330,  # E4
-    294   # D4
+    294, 330, 349, 392, 440, 494, 554, 587,
+    523, 466, 440, 392, 349, 330, 294
 ]
 
 note_index = 0
 last_note_change = 0
-NOTE_TIME = 400  # ms per note
+NOTE_TIME = 400
 
 
 def update_buzzer():
@@ -63,7 +43,6 @@ def update_buzzer():
 
     now = time.ticks_ms()
 
-    # Only update when changing pitch
     if time.ticks_diff(now, last_note_change) > NOTE_TIME:
         buzzer.freq(scale_notes[note_index])
         buzzer.duty_u16(30000)
@@ -88,17 +67,13 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.freq(1000)
     m.duty_u16(0)
 
-time.sleep(0.3)
 
-
-def set_motors(left_speed, right_speed):
-    # LEFT motor
-    m1_in1.duty_u16(int(left_speed))
+def set_motors(l, r):
+    m1_in1.duty_u16(int(l))
     m1_in2.duty_u16(0)
 
-    # RIGHT motor (keep inverted logic)
     m2_in1.duty_u16(0)
-    m2_in2.duty_u16(int(right_speed))
+    m2_in2.duty_u16(int(r))
 
 
 def stop():
@@ -175,26 +150,23 @@ K = 8000
 MIN_FWD = 12000
 MAX_FWD = 30000
 
-# Sonar obstacle stop
-SONAR_STOP = 10  # cm
+SONAR_STOP = 10
 
-# Finish line detection
+# FINISH LINE
 STOP_LEVEL = 2.0
 STOP_CONFIRM = 2
-RECENT_WINDOW = 300  # ms
+RECENT_WINDOW = 300
 
-# Finish line memory
 left_seen_time = 0
 right_seen_time = 0
 stop_counter = 0
 
-# Sonar timing
+# SHARP TURN
+SHARP_TURN = 0.18
+
+# SONAR
 last_sonar = 0
 distance = None
-
-# Safety timer
-start_time = time.ticks_ms()
-RUN_TIME = 40000
 
 
 def clamp(x):
@@ -211,94 +183,71 @@ def clamp(x):
 
 while True:
 
-    # =================================================
-    # SAFETY TIMER
-    # =================================================
-
-    if time.ticks_diff(time.ticks_ms(), start_time) > RUN_TIME:
-        stop()
-        show("TIME LIMIT")
-        print("Time limit reached")
-        break
-
-    # =================================================
-    # BUZZER UPDATE
-    # =================================================
-
+    # ---------------- BUZZER ----------------
     update_buzzer()
 
-    # =================================================
-    # READ LINE SENSORS
-    # =================================================
-
+    # ---------------- LINE SENSORS ----------------
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
-
-    # =================================================
-    # LINE FOLLOWING
-    # =================================================
 
     total = left_v + right_v + 0.0001
     error = (left_v / total) - (right_v / total)
 
-    steering = int(K * error)
-
-    left_speed = clamp(BASE - steering)
-    right_speed = clamp(BASE + steering)
-
-    set_motors(left_speed, right_speed)
-
     # =================================================
-    # SONAR (SAFE SLOW UPDATE)
+    # SHARP TURN (REVERSE ONE WHEEL)
     # =================================================
 
+    if error > SHARP_TURN:
+        m1_in1.duty_u16(0)
+        m1_in2.duty_u16(18000)
+
+        m2_in1.duty_u16(0)
+        m2_in2.duty_u16(26000)
+
+    elif error < -SHARP_TURN:
+        m1_in1.duty_u16(26000)
+        m1_in2.duty_u16(0)
+
+        m2_in1.duty_u16(18000)
+        m2_in2.duty_u16(0)
+
+    else:
+        steering = int(K * error)
+
+        left_speed = clamp(BASE - steering)
+        right_speed = clamp(BASE + steering)
+
+        set_motors(left_speed, right_speed)
+
+    # ---------------- SONAR ----------------
     now = time.ticks_ms()
 
     if time.ticks_diff(now, last_sonar) > 120:
         d = distance_cm()
-
         if d is not None:
             distance = d
-
         last_sonar = now
 
-    # =================================================
-    # OBSTACLE STOP
-    # =================================================
-
     if distance is not None:
-        print("SONAR:", distance)
-
         if distance < SONAR_STOP:
             stop()
             show("STOP OBJ")
-            print("Obstacle detected")
             time.sleep(0.5)
             continue
 
-    # =================================================
-    # FINISH LINE DETECTION
-    # Strong black + angled approach support
-    # =================================================
+    # ---------------- FINISH LINE ----------------
 
-    left_black_strong = left_v > STOP_LEVEL
-    right_black_strong = right_v > STOP_LEVEL
+    left_black = left_v > STOP_LEVEL
+    right_black = right_v > STOP_LEVEL
 
-    if left_black_strong:
+    if left_black:
         left_seen_time = time.ticks_ms()
 
-    if right_black_strong:
+    if right_black:
         right_seen_time = time.ticks_ms()
 
-    left_recent = (
-        time.ticks_diff(time.ticks_ms(), left_seen_time)
-        < RECENT_WINDOW
-    )
-
-    right_recent = (
-        time.ticks_diff(time.ticks_ms(), right_seen_time)
-        < RECENT_WINDOW
-    )
+    left_recent = time.ticks_diff(time.ticks_ms(), left_seen_time) < RECENT_WINDOW
+    right_recent = time.ticks_diff(time.ticks_ms(), right_seen_time) < RECENT_WINDOW
 
     if left_recent and right_recent:
         stop_counter += 1
@@ -308,29 +257,19 @@ while True:
     if stop_counter >= STOP_CONFIRM:
         stop()
         show("FINISH")
-        print("FINISH LINE DETECTED")
         break
 
-    # =================================================
-    # OLED DISPLAY
-    # =================================================
+    # ---------------- OLED ----------------
 
     if abs(error) < 0.02:
-        msg = "STRAIGHT"
+        show("STRAIGHT")
     elif error > 0:
-        msg = "LEFT"
+        show("LEFT")
     else:
-        msg = "RIGHT"
-
-    show(msg)
+        show("RIGHT")
 
     time.sleep(0.015)
 
 
-# =====================================================
-# FINAL SAFETY STOP
-# =====================================================
-
 stop()
 buzzer.duty_u16(0)
-print("Robot stopped")
