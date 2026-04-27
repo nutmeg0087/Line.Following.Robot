@@ -33,6 +33,7 @@ buzzer.freq(440)
 # Ascending: D E F G A B C# D
 # Descending: D C Bb A G F E D
 scale_notes = [
+    # Ascending
     294,  # D4
     330,  # E4
     349,  # F4
@@ -42,7 +43,7 @@ scale_notes = [
     554,  # C#5
     587,  # D5
 
-    587,  # D5
+    # Descending
     523,  # C5
     466,  # Bb4
     440,  # A4
@@ -54,7 +55,7 @@ scale_notes = [
 
 note_index = 0
 last_note_change = 0
-NOTE_TIME = 400  # milliseconds per note
+NOTE_TIME = 400  # ms per note
 
 
 def update_buzzer():
@@ -62,7 +63,7 @@ def update_buzzer():
 
     now = time.ticks_ms()
 
-    # Only "think about" changing pitch when needed
+    # Only update when changing pitch
     if time.ticks_diff(now, last_note_change) > NOTE_TIME:
         buzzer.freq(scale_notes[note_index])
         buzzer.duty_u16(30000)
@@ -87,13 +88,17 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.freq(1000)
     m.duty_u16(0)
 
+time.sleep(0.3)
 
-def set_motors(l, r):
-    m1_in1.duty_u16(int(l))
+
+def set_motors(left_speed, right_speed):
+    # LEFT motor
+    m1_in1.duty_u16(int(left_speed))
     m1_in2.duty_u16(0)
 
+    # RIGHT motor (keep inverted logic)
     m2_in1.duty_u16(0)
-    m2_in2.duty_u16(int(r))
+    m2_in2.duty_u16(int(right_speed))
 
 
 def stop():
@@ -133,7 +138,6 @@ def send_trigger_pulse():
 
 
 def measure_echo_pulse_us(timeout_us=TIMEOUT_US):
-
     start_wait = time.ticks_us()
 
     while ECHO.value() == 0:
@@ -171,10 +175,26 @@ K = 8000
 MIN_FWD = 12000
 MAX_FWD = 30000
 
+# Sonar obstacle stop
 SONAR_STOP = 10  # cm
 
+# Finish line detection
+STOP_LEVEL = 2.0
+STOP_CONFIRM = 2
+RECENT_WINDOW = 300  # ms
+
+# Finish line memory
+left_seen_time = 0
+right_seen_time = 0
+stop_counter = 0
+
+# Sonar timing
 last_sonar = 0
 distance = None
+
+# Safety timer
+start_time = time.ticks_ms()
+RUN_TIME = 40000
 
 
 def clamp(x):
@@ -186,10 +206,20 @@ def clamp(x):
 
 
 # =====================================================
-# LOOP
+# MAIN LOOP
 # =====================================================
 
 while True:
+
+    # =================================================
+    # SAFETY TIMER
+    # =================================================
+
+    if time.ticks_diff(time.ticks_ms(), start_time) > RUN_TIME:
+        stop()
+        show("TIME LIMIT")
+        print("Time limit reached")
+        break
 
     # =================================================
     # BUZZER UPDATE
@@ -198,11 +228,15 @@ while True:
     update_buzzer()
 
     # =================================================
-    # LINE FOLLOWING
+    # READ LINE SENSORS
     # =================================================
 
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
+
+    # =================================================
+    # LINE FOLLOWING
+    # =================================================
 
     total = left_v + right_v + 0.0001
     error = (left_v / total) - (right_v / total)
@@ -215,15 +249,17 @@ while True:
     set_motors(left_speed, right_speed)
 
     # =================================================
-    # SONAR (SLOW SAFE UPDATE)
+    # SONAR (SAFE SLOW UPDATE)
     # =================================================
 
     now = time.ticks_ms()
 
     if time.ticks_diff(now, last_sonar) > 120:
         d = distance_cm()
+
         if d is not None:
             distance = d
+
         last_sonar = now
 
     # =================================================
@@ -236,11 +272,47 @@ while True:
         if distance < SONAR_STOP:
             stop()
             show("STOP OBJ")
+            print("Obstacle detected")
             time.sleep(0.5)
             continue
 
     # =================================================
-    # OLED
+    # FINISH LINE DETECTION
+    # Strong black + angled approach support
+    # =================================================
+
+    left_black_strong = left_v > STOP_LEVEL
+    right_black_strong = right_v > STOP_LEVEL
+
+    if left_black_strong:
+        left_seen_time = time.ticks_ms()
+
+    if right_black_strong:
+        right_seen_time = time.ticks_ms()
+
+    left_recent = (
+        time.ticks_diff(time.ticks_ms(), left_seen_time)
+        < RECENT_WINDOW
+    )
+
+    right_recent = (
+        time.ticks_diff(time.ticks_ms(), right_seen_time)
+        < RECENT_WINDOW
+    )
+
+    if left_recent and right_recent:
+        stop_counter += 1
+    else:
+        stop_counter = 0
+
+    if stop_counter >= STOP_CONFIRM:
+        stop()
+        show("FINISH")
+        print("FINISH LINE DETECTED")
+        break
+
+    # =================================================
+    # OLED DISPLAY
     # =================================================
 
     if abs(error) < 0.02:
@@ -253,3 +325,12 @@ while True:
     show(msg)
 
     time.sleep(0.015)
+
+
+# =====================================================
+# FINAL SAFETY STOP
+# =====================================================
+
+stop()
+buzzer.duty_u16(0)
+print("Robot stopped")
