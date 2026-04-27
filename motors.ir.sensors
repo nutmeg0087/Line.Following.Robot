@@ -22,6 +22,29 @@ def show(msg):
 
 
 # =====================================================
+# LED SETUP (PINS 6,7,8,9)
+# =====================================================
+
+led1 = Pin(6, Pin.OUT)
+led2 = Pin(7, Pin.OUT)
+led3 = Pin(8, Pin.OUT)
+led4 = Pin(9, Pin.OUT)
+
+leds = [led1, led2, led3, led4]
+
+
+def flash_leds(times=6, delay=0.15):
+    for _ in range(times):
+        for led in leds:
+            led.value(1)
+        time.sleep(delay)
+
+        for led in leds:
+            led.value(0)
+        time.sleep(delay)
+
+
+# =====================================================
 # BUZZER (D CLASSICAL MELODIC MINOR SCALE)
 # =====================================================
 
@@ -29,7 +52,7 @@ buzzer = PWM(Pin(22))
 buzzer.duty_u16(0)
 
 scale_notes = [
-    294, 330, 349, 392, 440, 494, 554, 587,
+    294, 330, 349, 392, 440, 494, 554, 587, 587,
     523, 466, 440, 392, 349, 330, 294
 ]
 
@@ -152,19 +175,16 @@ MAX_FWD = 30000
 
 SONAR_STOP = 10
 
-# FINISH LINE CONTROL (FIXED)
 STOP_LEVEL = 2.0
 
-INTERSECTION_TIME = 120   # thin line (ignore)
-FINISH_TIME = 180         # thick line (stop)
-GRACE_TIME = 80           # prevents reset from flicker
+INTERSECTION_TIME = 120
+FINISH_TIME = 180   # tuned so it ACTUALLY triggers
+GRACE_TIME = 80
 
 both_black_start = None
 
-# SHARP TURN
 SHARP_TURN = 0.18
 
-# SONAR
 last_sonar = 0
 distance = None
 
@@ -192,7 +212,7 @@ while True:
     error = (left_v / total) - (right_v / total)
 
     # =================================================
-    # SHARP TURN (ONE WHEEL REVERSE)
+    # SHARP TURN
     # =================================================
 
     if error > SHARP_TURN:
@@ -229,15 +249,15 @@ while True:
             distance = d
         last_sonar = now
 
-    if distance is not None:
-        if distance < SONAR_STOP:
-            stop()
-            show("STOP OBJ")
-            time.sleep(0.5)
-            continue
+    if distance is not None and distance < SONAR_STOP:
+        stop()
+        show("STOP OBJ")
+        flash_leds()
+        time.sleep(0.5)
+        continue
 
     # =================================================
-    # FINISH LINE vs INTERSECTION (FIXED)
+    # FINISH + INTERSECTION DETECTION
     # =================================================
 
     left_black = left_v > STOP_LEVEL
@@ -251,18 +271,16 @@ while True:
 
         duration = time.ticks_diff(time.ticks_ms(), both_black_start)
 
-        # INTERSECTION → ignore
         if duration < INTERSECTION_TIME:
             pass
 
-        # FINISH LINE → stop
         elif duration > FINISH_TIME:
             stop()
             show("FINISH")
+            flash_leds()
             break
 
     else:
-        # prevent false reset from brief sensor flicker
         if both_black_start is not None:
             if time.ticks_diff(now, both_black_start) > GRACE_TIME:
                 both_black_start = None
