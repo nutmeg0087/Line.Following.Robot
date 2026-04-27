@@ -1,44 +1,81 @@
 from machine import Pin, PWM, ADC, I2C
 import time
-import math
 from sh1106 import SH1106_I2C
 
 # =====================================================
-# OLED
+# OLED SETUP
 # =====================================================
 
 i2c = I2C(0, sda=Pin(4), scl=Pin(5), freq=400000)
 devices = i2c.scan()
 
-oled = None
-if devices:
-    oled = SH1106_I2C(128, 64, i2c, addr=devices[0])
+if not devices:
+    raise Exception("No OLED found")
+
+oled = SH1106_I2C(128, 64, i2c, addr=devices[0])
+
 
 def show(msg):
-    if oled:
-        oled.fill(0)
-        oled.text(msg, 0, 0)
-        oled.show()
+    oled.fill(0)
+    oled.text(msg, 0, 0)
+    oled.show()
+
 
 # =====================================================
-# LEDS (RESTORED)
+# BUZZER (D CLASSICAL MELODIC MINOR SCALE)
 # =====================================================
 
-led1 = Pin(6, Pin.OUT)
-led2 = Pin(7, Pin.OUT)
-led3 = Pin(8, Pin.OUT)
-led4 = Pin(9, Pin.OUT)
-onboard = Pin("LED", Pin.OUT)
+# Buzzer on Pin 22
+buzzer = PWM(Pin(22))
+buzzer.duty_u16(0)
+buzzer.freq(440)
 
-def leds(a=0, b=0, c=0, d=0, main=0):
-    led1.value(a)
-    led2.value(b)
-    led3.value(c)
-    led4.value(d)
-    onboard.value(main)
+# Ascending: D E F G A B C# D
+# Descending: D C Bb A G F E D
+scale_notes = [
+    294,  # D4
+    330,  # E4
+    349,  # F4
+    392,  # G4
+    440,  # A4
+    494,  # B4
+    554,  # C#5
+    587,  # D5
+
+    587,  # D5
+    523,  # C5
+    466,  # Bb4
+    440,  # A4
+    392,  # G4
+    349,  # F4
+    330,  # E4
+    294   # D4
+]
+
+note_index = 0
+last_note_change = 0
+NOTE_TIME = 400  # milliseconds per note
+
+
+def update_buzzer():
+    global note_index, last_note_change
+
+    now = time.ticks_ms()
+
+    # Only "think about" changing pitch when needed
+    if time.ticks_diff(now, last_note_change) > NOTE_TIME:
+        buzzer.freq(scale_notes[note_index])
+        buzzer.duty_u16(30000)
+
+        note_index += 1
+        if note_index >= len(scale_notes):
+            note_index = 0
+
+        last_note_change = now
+
 
 # =====================================================
-# MOTORS (UNCHANGED)
+# MOTORS
 # =====================================================
 
 m1_in1 = PWM(Pin(10))
@@ -50,116 +87,169 @@ for m in [m1_in1, m1_in2, m2_in1, m2_in2]:
     m.freq(1000)
     m.duty_u16(0)
 
-MAX_PWM = 30000
 
-def set_motor(left, right):
-    if left >= 0:
-        m1_in1.duty_u16(int(left))
-        m1_in2.duty_u16(0)
-    else:
-        m1_in1.duty_u16(0)
-        m1_in2.duty_u16(int(-left))
+def set_motors(l, r):
+    m1_in1.duty_u16(int(l))
+    m1_in2.duty_u16(0)
 
-    if right >= 0:
-        m2_in2.duty_u16(int(right))
-        m2_in1.duty_u16(0)
-    else:
-        m2_in2.duty_u16(0)
-        m2_in1.duty_u16(int(-right))
+    m2_in1.duty_u16(0)
+    m2_in2.duty_u16(int(r))
+
+
+def stop():
+    set_motors(0, 0)
+
 
 # =====================================================
-# SENSORS
+# LINE SENSORS
 # =====================================================
 
 left_sensor = ADC(26)
 right_sensor = ADC(27)
 
+
 def read_voltage(adc):
     return adc.read_u16() / 65535 * 3.3
+
+
+# =====================================================
+# SONAR
+# =====================================================
+
+TRIG = Pin(14, Pin.OUT)
+ECHO = Pin(15, Pin.IN)
+
+TRIG_PULSE_US = 10
+TIMEOUT_US = 30000
+SPEED_CM_PER_US = 0.0343
+
+
+def send_trigger_pulse():
+    TRIG.value(0)
+    time.sleep_us(2)
+    TRIG.value(1)
+    time.sleep_us(TRIG_PULSE_US)
+    TRIG.value(0)
+
+
+def measure_echo_pulse_us(timeout_us=TIMEOUT_US):
+
+    start_wait = time.ticks_us()
+
+    while ECHO.value() == 0:
+        if time.ticks_diff(time.ticks_us(), start_wait) > timeout_us:
+            return None
+
+    pulse_start = time.ticks_us()
+
+    while ECHO.value() == 1:
+        if time.ticks_diff(time.ticks_us(), pulse_start) > timeout_us:
+            return None
+
+    pulse_end = time.ticks_us()
+
+    return time.ticks_diff(pulse_end, pulse_start)
+
+
+def distance_cm():
+    send_trigger_pulse()
+    echo_us = measure_echo_pulse_us()
+
+    if echo_us is None:
+        return None
+
+    return (echo_us * SPEED_CM_PER_US) / 2
+
 
 # =====================================================
 # SETTINGS
 # =====================================================
 
 BASE = 22000
-K = 6000
+K = 8000
 
-MAX_STEERING = 24000
+MIN_FWD = 12000
+MAX_FWD = 30000
 
-REVERSE_STRENGTH = 0.35
+SONAR_STOP = 10  # cm
 
-last_error = 0
+last_sonar = 0
+distance = None
+
+
+def clamp(x):
+    if x < MIN_FWD:
+        return MIN_FWD
+    if x > MAX_FWD:
+        return MAX_FWD
+    return x
+
 
 # =====================================================
-# MAIN LOOP
+# LOOP
 # =====================================================
 
 while True:
 
+    # =================================================
+    # BUZZER UPDATE
+    # =================================================
+
+    update_buzzer()
+
+    # =================================================
+    # LINE FOLLOWING
+    # =================================================
+
     left_v = read_voltage(left_sensor)
     right_v = read_voltage(right_sensor)
 
-    error = left_v - right_v
+    total = left_v + right_v + 0.0001
+    error = (left_v / total) - (right_v / total)
 
-    # smoothing
-    error = (error * 0.7) + (last_error * 0.3)
-    last_error = error
+    steering = int(K * error)
 
-    # -------------------------------------------------
-    # STEERING FORCE
-    # -------------------------------------------------
+    left_speed = clamp(BASE - steering)
+    right_speed = clamp(BASE + steering)
 
-    steering = K * error
-    steering = max(-MAX_STEERING, min(MAX_STEERING, steering))
+    set_motors(left_speed, right_speed)
 
-    base = BASE - (abs(steering) // 3)
-    if base < 12000:
-        base = 12000
+    # =================================================
+    # SONAR (SLOW SAFE UPDATE)
+    # =================================================
 
-    # -------------------------------------------------
-    # NORMAL MIX
-    # -------------------------------------------------
+    now = time.ticks_ms()
 
-    left_speed = base - steering
-    right_speed = base + steering
+    if time.ticks_diff(now, last_sonar) > 120:
+        d = distance_cm()
+        if d is not None:
+            distance = d
+        last_sonar = now
 
-    # -------------------------------------------------
-    # REVERSE WHEEL ASSIST
-    # -------------------------------------------------
+    # =================================================
+    # OBSTACLE STOP
+    # =================================================
 
-    turn_intensity = abs(steering) / MAX_STEERING
+    if distance is not None:
+        print("SONAR:", distance)
 
-    if turn_intensity > 0.2:
-        reverse_amount = int(8000 * turn_intensity * REVERSE_STRENGTH)
+        if distance < SONAR_STOP:
+            stop()
+            show("STOP OBJ")
+            time.sleep(0.5)
+            continue
 
-        if steering > 0:
-            left_speed -= reverse_amount
-        else:
-            right_speed -= reverse_amount
+    # =================================================
+    # OLED
+    # =================================================
 
-    # -------------------------------------------------
-    # SAFETY LIMITS
-    # -------------------------------------------------
-
-    left_speed = max(-12000, min(MAX_PWM, left_speed))
-    right_speed = max(-12000, min(MAX_PWM, right_speed))
-
-    set_motor(left_speed, right_speed)
-
-    # -------------------------------------------------
-    # DISPLAY + LEDS (FIXED)
-    # -------------------------------------------------
-
-    if abs(error) < 0.08:
-        show("CENTER")
-        leds(0, 0, 1, 0, 1)
-
+    if abs(error) < 0.02:
+        msg = "STRAIGHT"
     elif error > 0:
-        show("RIGHT")
-        leds(0, 0, 1, 1, 1)
-
+        msg = "LEFT"
     else:
-        show("LEFT")
-        leds(1, 1, 0, 0, 1)
+        msg = "RIGHT"
 
-    time.sleep(0.01)
+    show(msg)
+
+    time.sleep(0.015)
